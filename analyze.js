@@ -1,169 +1,140 @@
-// ===============================
-// 12ROMn Analyze.js
-// Version: v1.0.2
-// Fix: Android Chrome video seek + MediaPipe Hands stability
-// ===============================
+/* =========================================================
+   ROM Analyzer
+   MODE:
+     EXT_OK = 伸展可能時測定（伸展位自動検出）
+     EXT_NG = 伸展不能時測定（ROM弧のみ）
+   ========================================================= */
 
-let DEBUG_LOG = [];
-let hud;
+const ROM_NAME = "12ROMn";
+const ANALYZE_VERSION = "v1.2.0-dual";
+const BUILD_TIME = "2026-01-02";
 
-const ANALYZE_VERSION = "12ROMn v1.0.2";
+log(`Analyze.js loaded : ${ROM_NAME} ${ANALYZE_VERSION}`);
+log(`BUILD ${BUILD_TIME}`);
 
-function log(msg){
-  const t = new Date().toLocaleTimeString();
-  const line = `[${t}] ${msg}`;
-  DEBUG_LOG.push(line);
-  if (hud) hud.innerText = line;
-  console.log(line);
+/* ---------- Utility ---------- */
+
+function angleDeg(a, b, c) {
+  const BA = { x: a.x - b.x, y: a.y - b.y, z: (a.z ?? 0) - (b.z ?? 0) };
+  const BC = { x: c.x - b.x, y: c.y - b.y, z: (c.z ?? 0) - (b.z ?? 0) };
+  const dot = BA.x * BC.x + BA.y * BC.y + BA.z * BC.z;
+  const magBA = Math.hypot(BA.x, BA.y, BA.z);
+  const magBC = Math.hypot(BC.x, BC.y, BC.z);
+  if (magBA * magBC === 0) return NaN;
+  const cos = Math.min(1, Math.max(-1, dot / (magBA * magBC)));
+  return Math.acos(cos) * 180 / Math.PI;
 }
 
-function copyDebugLog(){
-  navigator.clipboard.writeText(
-    `Analyze=${ANALYZE_VERSION}\n` +
-    DEBUG_LOG.join("\n")
-  );
-  alert("デバッグログをコピーしました");
-}
+/* ---------- Finger map (MediaPipe Hands) ---------- */
 
-// ===== seek 完了＋フレーム準備待ち（Android対策）=====
-function seekVideoStable(video, time){
-  return new Promise(resolve=>{
-    const handler = ()=>{
-      video.removeEventListener("seeked", handler);
+const FINGERS = {
+  ring:  { mcp:13, pip:14, dip:15, tip:16 },
+  pinky: { mcp:17, pip:18, dip:19, tip:20 }
+};
 
-      // GPU にフレームが載るまで 2フレ待つ
-      requestAnimationFrame(()=>{
-        requestAnimationFrame(resolve);
-      });
-    };
-    video.addEventListener("seeked", handler, { once:true });
-    video.currentTime = time;
-  });
-}
+/* ---------- Core ---------- */
 
-// ===============================
-// メイン解析
-// ===============================
-async function analyze(){
+async function analyze(mode = "EXT_OK") {
 
-  hud = document.getElementById("hud");
-  log(`analyze() start (${ANALYZE_VERSION})`);
+  log("--------------------------------------------------");
+  log(`analyze() start`);
+  log(`MODE = ${mode}`);
+  log(`ROM = ${ROM_NAME}  VER = ${ANALYZE_VERSION}`);
 
-  const out = document.getElementById("result");
-  const file = document.getElementById("videoInput").files[0];
-  if(!file){
-    out.innerText = "動画を選択してください";
-    log("no file");
+  if (!window.video || !window.hands) {
+    log("ERROR: video / hands not ready");
     return;
   }
 
-  out.innerText = "解析中…";
+  const duration = video.duration;
+  const DT = 0.5;
 
-  // ===== 動画 =====
-  const video = document.createElement("video");
-  video.src = URL.createObjectURL(file);
-  video.muted = true;
-  await video.play();
-  log(`video loaded (${video.duration.toFixed(2)}s)`);
+  const data = {};
+  for (const f in FINGERS) {
+    data[f] = { MCP: [], PIP: [], DIP: [], score: [] };
+  }
 
-  const canvas = document.createElement("canvas");
-  const ctx = canvas.getContext("2d");
+  /* ----- full scan ----- */
+  for (let t = 0; t <= duration; t += DT) {
+    video.currentTime = t;
+    await new Promise(r => video.onseeked = r);
 
-  const FPS = 2;
-  let totalFrames = 0;
-  let detectedFrames = 0;
+    try {
+      await hands.send({ image: video });
+    } catch {
+      continue;
+    }
 
-  let MCP = [], PIP = [], DIP = [];
+    if (!window.lastLandmarks) continue;
+    const lm = window.lastLandmarks;
 
-  // ===== MediaPipe =====
-  const hands = new Hands({
-    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
-  });
-  hands.setOptions({
-    maxNumHands: 1,
-    modelComplexity: 1
-  });
+    for (const f in FINGERS) {
+      const idx = FINGERS[f];
+      const mcp = angleDeg(lm[idx.mcp], lm[idx.pip], lm[idx.dip]);
+      const pip = angleDeg(lm[idx.pip], lm[idx.dip], lm[idx.tip]);
+      const dip = angleDeg(lm[idx.dip], lm[idx.tip], lm[idx.tip]); // 補助
 
-  hands.onResults(res=>{
-    totalFrames++;
-    if(!res.multiHandLandmarks) return;
+      if ([mcp, pip, dip].some(v => isNaN(v))) continue;
 
-    detectedFrames++;
-    const lm = res.multiHandLandmarks[0];
-
-    const PALM = lm[0];
-    const MCPp = lm[17];
-    const PIPp = lm[18];
-    const DIPp = lm[19];
-    const TIP  = lm[20];
-
-    MCP.push(innerAngle3D(PALM, MCPp, PIPp));
-    PIP.push(innerAngle3D(MCPp, PIPp, DIPp));
-    DIP.push(innerAngle3D(PIPp, DIPp, TIP));
-  });
-
-  // ===== フレーム処理（安定版）=====
-  for(let t=0; t<video.duration; t+=1/FPS){
-    log(`seek ${t.toFixed(2)}s`);
-    await seekVideoStable(video, t);
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video,0,0);
-
-    try{
-      await hands.send({ image: canvas });
-    }catch(e){
-      log("hands.send failed, skip frame");
+      data[f].MCP.push(mcp);
+      data[f].PIP.push(pip);
+      data[f].DIP.push(dip);
+      data[f].score.push(mcp + pip + dip);
     }
   }
 
-  log(`frames done total=${totalFrames} detected=${detectedFrames}`);
+  /* ----- compute ----- */
+  for (const f in data) {
 
-  // ===== 品質 =====
-  if(detectedFrames/totalFrames < 0.7){
-    out.innerHTML = "⚠️ 小指が十分に写っていません（側面から撮影してください）";
-    log("visibility low");
-    return;
+    const out = {};
+    const d = data[f];
+
+    if (d.MCP.length === 0) {
+      log(`${f}: no valid frames`);
+      continue;
+    }
+
+    const maxScore = Math.max(...d.score);
+    const minScore = Math.min(...d.score);
+    const idxExt = d.score.indexOf(maxScore);
+
+    for (const j of ["MCP","PIP","DIP"]) {
+      const arr = d[j];
+      const max = Math.max(...arr);
+      const min = Math.min(...arr);
+
+      if (mode === "EXT_OK") {
+        const base = arr[idxExt];
+        out[j] = {
+          flex: Math.max(0, base - min),
+          ext:  Math.max(0, max - base)
+        };
+      } else { // EXT_NG
+        out[j] = {
+          arc: Math.max(0, max - min)
+        };
+      }
+    }
+
+    log(`--- ${f.toUpperCase()} ---`);
+
+    if (mode === "EXT_OK") {
+      log(`MCP: 屈曲 ${out.MCP.flex.toFixed(1)}° / 伸展 ${out.MCP.ext.toFixed(1)}°`);
+      log(`PIP: 屈曲 ${out.PIP.flex.toFixed(1)}° / 伸展 ${out.PIP.ext.toFixed(1)}°`);
+      log(`DIP: 屈曲 ${out.DIP.flex.toFixed(1)}° / 伸展 ${out.DIP.ext.toFixed(1)}°`);
+      if (idxExt === 0 || idxExt === d.score.length - 1) {
+        log(`⚠ 伸展位が十分でない可能性（参考値）`);
+      }
+    } else {
+      log(`MCP ROM弧: ${out.MCP.arc.toFixed(1)}°`);
+      log(`PIP ROM弧: ${out.PIP.arc.toFixed(1)}°`);
+      log(`DIP ROM弧: ${out.DIP.arc.toFixed(1)}°`);
+      log(`※伸展位未確認（拘縮・疼痛症例向け）`);
+    }
   }
-
-  // ===== 屈曲・伸展角（修正済み定義）=====
-  // 内角：伸展≈180°
-  // 屈曲＝最大−最小（可動域）
-  // 伸展＝180°超過分のみ
-  const result = {
-    MCP_flex: Math.max(...MCP) - Math.min(...MCP),
-    MCP_ext:  Math.max(0, Math.max(...MCP) - 180),
-    PIP_flex: Math.max(...PIP) - Math.min(...PIP),
-    PIP_ext:  Math.max(0, Math.max(...PIP) - 180),
-    DIP_flex: Math.max(...DIP) - Math.min(...DIP),
-    DIP_ext:  Math.max(0, Math.max(...DIP) - 180)
-  };
-
-  out.innerHTML = `
-    <b>測定完了</b><br>
-    <small>Analyze ${ANALYZE_VERSION}</small><br><br>
-
-    MCP：屈曲 ${result.MCP_flex.toFixed(1)}° /
-    伸展 ${result.MCP_ext.toFixed(1)}°<br>
-
-    PIP：屈曲 ${result.PIP_flex.toFixed(1)}° /
-    伸展 ${result.PIP_ext.toFixed(1)}°<br>
-
-    DIP：屈曲 ${result.DIP_flex.toFixed(1)}° /
-    伸展 ${result.DIP_ext.toFixed(1)}°
-  `;
 
   log("analysis finished");
 }
 
-// ===============================
-// 3D 内角
-// ===============================
-function innerAngle3D(a,b,c){
-  const ab = {x:a.x-b.x, y:a.y-b.y, z:a.z-b.z};
-  const cb = {x:c.x-b.x, y:c.y-b.y, z:c.z-b.z};
-  const dot = ab.x*cb.x + ab.y*cb.y + ab.z*cb.z;
-  const mag = Math.hypot(ab.x,ab.y,ab.z) * Math.hypot(cb.x,cb.y,cb.z);
-  return Math.acos(dot/mag) * 180 / Math.PI;
-}
+/* expose */
+window.safeAnalyze = (mode) => analyze(mode);
