@@ -1,140 +1,177 @@
-/* =========================================================
-   ROM Analyzer
-   MODE:
-     EXT_OK = 伸展可能時測定（伸展位自動検出）
-     EXT_NG = 伸展不能時測定（ROM弧のみ）
-   ========================================================= */
+/* =====================================================
+   Hand ROM Analyzer
+   FULL REPLACEMENT analyze.js
+   ROM : 12ROMn
+   VER : v1.3.0-romfix
+   BUILD : 2026-01-02
+===================================================== */
 
-const ROM_NAME = "12ROMn";
-const ANALYZE_VERSION = "v1.2.0-dual";
-const BUILD_TIME = "2026-01-02";
+log("Analyze.js loaded : 12ROMn v1.3.0-romfix");
+log("BUILD 2026-01-02");
 
-log(`Analyze.js loaded : ${ROM_NAME} ${ANALYZE_VERSION}`);
-log(`BUILD ${BUILD_TIME}`);
+const ANALYZE_VERSION = "v1.3.0-romfix";
 
 /* ---------- Utility ---------- */
 
-function angleDeg(a, b, c) {
-  const BA = { x: a.x - b.x, y: a.y - b.y, z: (a.z ?? 0) - (b.z ?? 0) };
-  const BC = { x: c.x - b.x, y: c.y - b.y, z: (c.z ?? 0) - (b.z ?? 0) };
-  const dot = BA.x * BC.x + BA.y * BC.y + BA.z * BC.z;
-  const magBA = Math.hypot(BA.x, BA.y, BA.z);
-  const magBC = Math.hypot(BC.x, BC.y, BC.z);
-  if (magBA * magBC === 0) return NaN;
-  const cos = Math.min(1, Math.max(-1, dot / (magBA * magBC)));
-  return Math.acos(cos) * 180 / Math.PI;
+function vec(a, b){
+  return { x:b.x-a.x, y:b.y-a.y, z:(b.z??0)-(a.z??0) };
+}
+function dot(v1, v2){
+  return v1.x*v2.x + v1.y*v2.y + v1.z*v2.z;
+}
+function mag(v){
+  return Math.sqrt(dot(v,v));
 }
 
-/* ---------- Finger map (MediaPipe Hands) ---------- */
+/* raw angle (0–180) */
+function angleDeg(a, b, c){
+  const v1 = vec(b,a);
+  const v2 = vec(b,c);
+  const m1 = mag(v1), m2 = mag(v2);
+  if(m1===0 || m2===0) return NaN;
+  let cos = dot(v1,v2)/(m1*m2);
+  cos = Math.max(-1, Math.min(1, cos));
+  return Math.acos(cos)*180/Math.PI;
+}
 
-const FINGERS = {
-  ring:  { mcp:13, pip:14, dip:15, tip:16 },
-  pinky: { mcp:17, pip:18, dip:19, tip:20 }
+/* ROM definition
+   - extension ≈ 0
+   - flexion   ≈ positive
+*/
+function jointROM(a,b,c){
+  const raw = angleDeg(a,b,c);
+  if(isNaN(raw)) return NaN;
+  return 180 - raw;
+}
+
+/* ---------- Index map ---------- */
+
+const IDX = {
+  thumb:{
+    mcp:2, pip:3, dip:4, tip:4
+  },
+  index:{
+    mcp:5, pip:6, dip:7, tip:8
+  },
+  middle:{
+    mcp:9, pip:10, dip:11, tip:12
+  },
+  ring:{
+    mcp:13, pip:14, dip:15, tip:16
+  },
+  pinky:{
+    mcp:17, pip:18, dip:19, tip:20
+  }
 };
 
-/* ---------- Core ---------- */
+/* ---------- Safe entry ---------- */
 
-async function analyze(mode = "EXT_OK") {
-
+function safeAnalyze(mode){
   log("--------------------------------------------------");
-  log(`analyze() start`);
-  log(`MODE = ${mode}`);
-  log(`ROM = ${ROM_NAME}  VER = ${ANALYZE_VERSION}`);
+  analyze(mode);
+}
 
-  if (!window.video || !window.hands) {
+/* ---------- Main ---------- */
+
+function analyze(mode){
+  log("analyze() start");
+  log(`MODE = ${mode}`);
+  log(`ROM = 12ROMn  VER = ${ANALYZE_VERSION}`);
+
+  if(!window.video || !window.hands){
     log("ERROR: video / hands not ready");
     return;
   }
 
-  const duration = video.duration;
-  const DT = 0.5;
+  const group = window.selectedGroup || "pinky";
+  const fingerSet =
+    (group==="thumb")
+      ? ["index","middle"]
+      : ["ring","pinky"];
 
-  const data = {};
-  for (const f in FINGERS) {
-    data[f] = { MCP: [], PIP: [], DIP: [], score: [] };
-  }
+  const results = [];
+  let seekT = 0;
+  const SEEK_STEP = 0.5;
 
-  /* ----- full scan ----- */
-  for (let t = 0; t <= duration; t += DT) {
-    video.currentTime = t;
-    await new Promise(r => video.onseeked = r);
+  video.currentTime = 0;
 
-    try {
-      await hands.send({ image: video });
-    } catch {
-      continue;
+  function step(){
+    if(seekT > video.duration){
+      finish();
+      return;
     }
 
-    if (!window.lastLandmarks) continue;
-    const lm = window.lastLandmarks;
+    video.currentTime = seekT;
+    seekT += SEEK_STEP;
 
-    for (const f in FINGERS) {
-      const idx = FINGERS[f];
-      const mcp = angleDeg(lm[idx.mcp], lm[idx.pip], lm[idx.dip]);
-      const pip = angleDeg(lm[idx.pip], lm[idx.dip], lm[idx.tip]);
-      const dip = angleDeg(lm[idx.dip], lm[idx.tip], lm[idx.tip]); // 補助
-
-      if ([mcp, pip, dip].some(v => isNaN(v))) continue;
-
-      data[f].MCP.push(mcp);
-      data[f].PIP.push(pip);
-      data[f].DIP.push(dip);
-      data[f].score.push(mcp + pip + dip);
-    }
-  }
-
-  /* ----- compute ----- */
-  for (const f in data) {
-
-    const out = {};
-    const d = data[f];
-
-    if (d.MCP.length === 0) {
-      log(`${f}: no valid frames`);
-      continue;
-    }
-
-    const maxScore = Math.max(...d.score);
-    const minScore = Math.min(...d.score);
-    const idxExt = d.score.indexOf(maxScore);
-
-    for (const j of ["MCP","PIP","DIP"]) {
-      const arr = d[j];
-      const max = Math.max(...arr);
-      const min = Math.min(...arr);
-
-      if (mode === "EXT_OK") {
-        const base = arr[idxExt];
-        out[j] = {
-          flex: Math.max(0, base - min),
-          ext:  Math.max(0, max - base)
-        };
-      } else { // EXT_NG
-        out[j] = {
-          arc: Math.max(0, max - min)
-        };
+    setTimeout(()=>{
+      if(!window.lastLandmarks){
+        log("No landmarks");
+        step();
+        return;
       }
-    }
 
-    log(`--- ${f.toUpperCase()} ---`);
+      const lm = window.lastLandmarks;
 
-    if (mode === "EXT_OK") {
-      log(`MCP: 屈曲 ${out.MCP.flex.toFixed(1)}° / 伸展 ${out.MCP.ext.toFixed(1)}°`);
-      log(`PIP: 屈曲 ${out.PIP.flex.toFixed(1)}° / 伸展 ${out.PIP.ext.toFixed(1)}°`);
-      log(`DIP: 屈曲 ${out.DIP.flex.toFixed(1)}° / 伸展 ${out.DIP.ext.toFixed(1)}°`);
-      if (idxExt === 0 || idxExt === d.score.length - 1) {
-        log(`⚠ 伸展位が十分でない可能性（参考値）`);
-      }
-    } else {
-      log(`MCP ROM弧: ${out.MCP.arc.toFixed(1)}°`);
-      log(`PIP ROM弧: ${out.PIP.arc.toFixed(1)}°`);
-      log(`DIP ROM弧: ${out.DIP.arc.toFixed(1)}°`);
-      log(`※伸展位未確認（拘縮・疼痛症例向け）`);
-    }
+      fingerSet.forEach(f=>{
+        const i = IDX[f];
+        if(!i) return;
+
+        const mcp = jointROM(lm[i.mcp], lm[i.pip], lm[i.dip]);
+        const pip = jointROM(lm[i.pip], lm[i.dip], lm[i.tip]);
+        const dip = jointROM(lm[i.pip], lm[i.dip], lm[i.tip]); // ← FIXED
+
+        if(
+          [mcp,pip,dip].some(v=>isNaN(v))
+        ) return;
+
+        const score = mcp + pip + dip;
+
+        results.push({
+          finger:f,
+          mcp, pip, dip,
+          score
+        });
+      });
+
+      step();
+    },120);
   }
 
-  log("analysis finished");
+  function finish(){
+    if(results.length===0){
+      log("No valid frames");
+      return;
+    }
+
+    const byFinger = {};
+    results.forEach(r=>{
+      if(!byFinger[r.finger]) byFinger[r.finger]=[];
+      byFinger[r.finger].push(r);
+    });
+
+    let out = "";
+    Object.keys(byFinger).forEach(f=>{
+      const arr = byFinger[f];
+
+      let flex, ext;
+
+      if(mode==="EXT_OK"){
+        ext = arr.reduce((a,b)=>a.score<b.score?a:b);
+      }else{
+        ext = arr[0];
+      }
+      flex = arr.reduce((a,b)=>a.score>b.score?a:b);
+
+      out += `\n${f}\n`;
+      out += `MCP：屈曲 ${flex.mcp.toFixed(1)}° / 伸展 ${ext.mcp.toFixed(1)}°\n`;
+      out += `PIP：屈曲 ${flex.pip.toFixed(1)}° / 伸展 ${ext.pip.toFixed(1)}°\n`;
+      out += `DIP：屈曲 ${flex.dip.toFixed(1)}° / 伸展 ${ext.dip.toFixed(1)}°\n`;
+    });
+
+    document.getElementById("result").innerText = out;
+    log("analysis finished");
+  }
+
+  step();
 }
-
-/* expose */
-window.safeAnalyze = (mode) => analyze(mode);
