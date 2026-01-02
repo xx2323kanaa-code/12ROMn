@@ -52,13 +52,11 @@ td,th{border:1px solid #555;padding:3px;text-align:center;}
 
 <div id="guide">
 <b>撮影ガイド</b><br>
-・ご自身で撮影する場合：<b>内側（手掌側）カメラ推奨</b><br>
-・他者撮影：背側／やや斜位でも可<br><br>
-<b>重要</b><br>
-・<b>親指側</b>：人さし指＋中指<br>
-・<b>小指側</b>：薬指＋小指<br>
-・指を意図的に離す必要はありません<br>
-・わずかに背側寄り／手掌寄りが必要です
+・内側（手掌側）推奨／背側でも可<br>
+・指は無理に伸ばさなくてよい<br><br>
+<b>測定モード</b><br>
+・<b>伸展可能</b>：最大伸展が動画内にある場合<br>
+・<b>伸展不能</b>：拘縮・疼痛がある場合
 </div>
 
 <div id="controls">
@@ -72,8 +70,16 @@ td,th{border:1px solid #555;padding:3px;text-align:center;}
   小指側（薬指・小指）
 </label>
 <br><br>
-<input type="file" id="videoInput" accept="video/*">
-<button onclick="analyze()">解析開始</button>
+
+<input type="file" id="videoInput" accept="video/*"><br><br>
+
+<button onclick="runAnalyze('EXT_OK')">
+  伸展可能時 測定
+</button>
+
+<button onclick="runAnalyze('EXT_NG')" style="margin-left:6px;">
+  伸展不能時 測定
+</button>
 </div>
 
 <div id="result">動画を選択してください</div>
@@ -93,13 +99,13 @@ td,th{border:1px solid #555;padding:3px;text-align:center;}
 <tr><td>薬指</td><td>90°</td><td>100°</td><td>70°</td></tr>
 <tr><td>小指</td><td>90°</td><td>100°</td><td>70°</td></tr>
 </table>
-<div style="margin-top:6px;">※ 画像解析による推定値</div>
 </div>
 
+<!-- ===== MediaPipe ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 
+<!-- ===== Debug / UI helpers ===== -->
 <script>
-/* ===== 共通 ===== */
 let DEBUG_LOG=[];
 function log(m){
   const t=new Date().toLocaleTimeString();
@@ -114,117 +120,25 @@ function toggleJOA(){
   const p=document.getElementById("joaPanel");
   p.style.display=(p.style.display==="none")?"block":"none";
 }
+</script>
 
-function innerAngle(a,b,c){
-  const ab={x:a.x-b.x,y:a.y-b.y,z:(a.z||0)-(b.z||0)};
-  const cb={x:c.x-b.x,y:c.y-b.y,z:(c.z||0)-(b.z||0)};
-  const dot=ab.x*cb.x+ab.y*cb.y+ab.z*cb.z;
-  const mag=Math.hypot(ab.x,ab.y,ab.z)*Math.hypot(cb.x,cb.y,cb.z);
-  if(!isFinite(dot/mag)) return null;
-  return Math.acos(dot/mag)*180/Math.PI;
-}
+<!-- ===== External Analyzer (唯一の解析ロジック) ===== -->
+<script src="analyze.js"></script>
 
-async function seekVideo(video,time){
-  return new Promise(res=>{
-    const h=()=>{video.removeEventListener("seeked",h);res();};
-    video.addEventListener("seeked",h);
-    video.currentTime=time;
-  });
-}
-
-/* ===== 2指グループ固定 ===== */
-const GROUPS={
-  thumb:{
-    index:[5,6,7,8],
-    middle:[9,10,11,12]
-  },
-  pinky:{
-    ring:[13,14,15,16],
-    pinky:[17,18,19,20]
-  }
-};
-
-async function analyze(){
-  DEBUG_LOG=[];
-  log("analyze() start");
-
+<script>
+function runAnalyze(mode){
   const file=document.getElementById("videoInput").files[0];
-  if(!file){log("no video");return;}
-
-  const group=document.querySelector('input[name="group"]:checked').value;
-  const fingers=GROUPS[group];
-
-  const video=document.createElement("video");
-  video.src=URL.createObjectURL(file);
-  await video.play();
-  log(`video loaded (${video.duration.toFixed(2)}s)`);
-
-  const canvas=document.createElement("canvas");
-  const ctx=canvas.getContext("2d");
-
-  let data={};
-  for(let f in fingers){
-    data[f]={MCP:[],PIP:[],DIP:[],dist:[]};
+  if(!file){
+    log("no video selected");
+    return;
   }
+  window.selectedGroup =
+    document.querySelector('input[name="group"]:checked').value;
 
-  const hands=new Hands({
-    locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
-  });
-  hands.setOptions({maxNumHands:1,modelComplexity:1});
+  window.selectedVideoFile = file;
 
-  hands.onResults(res=>{
-    if(!res.multiHandLandmarks) return;
-    const lm=res.multiHandLandmarks[0];
-    const palm=lm[0];
-
-    for(let f in fingers){
-      const [mcp,pip,dip,tip]=fingers[f];
-      const a1=innerAngle(palm,lm[mcp],lm[pip]);
-      const a2=innerAngle(lm[mcp],lm[pip],lm[dip]);
-      const a3=innerAngle(lm[pip],lm[dip],lm[tip]);
-      if(a1!=null) data[f].MCP.push(a1);
-      if(a2!=null) data[f].PIP.push(a2);
-      if(a3!=null) data[f].DIP.push(a3);
-
-      const d=Math.hypot(lm[tip].x-palm.x,lm[tip].y-palm.y,(lm[tip].z||0)-(palm.z||0));
-      const norm=Math.hypot(lm[mcp].x-palm.x,lm[mcp].y-palm.y,(lm[mcp].z||0)-(palm.z||0));
-      if(isFinite(d/norm)) data[f].dist.push(d/norm);
-    }
-  });
-
-  const FPS=2;
-  for(let t=0;t<video.duration;t+=1/FPS){
-    log(`seek ${t.toFixed(2)}s`);
-    await seekVideo(video,t);
-    canvas.width=video.videoWidth;
-    canvas.height=video.videoHeight;
-    ctx.drawImage(video,0,0);
-    try{
-      await hands.send({image:canvas});
-    }catch(e){
-      log("hands.send failed, skip frame");
-    }
-  }
-
-  let html="<b>測定結果</b><br><br>";
-  const flex=x=>180-Math.min(...x);
-  const ext=x=>180-Math.max(...x);
-
-  for(let f in data){
-    const d=data[f];
-    if(d.MCP.length===0){
-      html+=`${f}: 測定不可<br><br>`; continue;
-    }
-    html+=`<b>${f}</b><br>
-    MCP：屈曲 ${flex(d.MCP).toFixed(1)}° / 伸展 ${ext(d.MCP).toFixed(1)}°<br>
-    PIP：屈曲 ${flex(d.PIP).toFixed(1)}° / 伸展 ${ext(d.PIP).toFixed(1)}°<br>
-    DIP：屈曲 ${flex(d.DIP).toFixed(1)}° / 伸展 ${ext(d.DIP).toFixed(1)}°<br>
-    完全屈曲 指尖―手掌距離（正規化・無次元）： ${Math.min(...d.dist).toFixed(2)}
-    <br><br>`;
-  }
-
-  document.getElementById("result").innerHTML=html;
-  log("analysis finished");
+  log(`UI call → safeAnalyze(${mode})`);
+  safeAnalyze(mode);
 }
 </script>
 
