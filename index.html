@@ -25,6 +25,10 @@ h1{font-size:18px;margin:0 0 8px 0;}
   position:fixed; top:8px; left:8px;
   font-size:11px; color:#9f9;
 }
+#buildTag{
+  position:fixed; top:26px; left:8px;
+  font-size:10px; color:#6f6;
+}
 #buttons{
   position:fixed; right:12px; bottom:12px;
   display:flex; gap:10px;
@@ -73,17 +77,13 @@ td,th{border:1px solid #555;padding:3px;text-align:center;}
 
 <input type="file" id="videoInput" accept="video/*"><br><br>
 
-<button onclick="runAnalyze('EXT_OK')">
-  伸展可能時 測定
-</button>
-
-<button onclick="runAnalyze('EXT_NG')" style="margin-left:6px;">
-  伸展不能時 測定
-</button>
+<button onclick="runAnalyze('EXT_OK')">伸展可能時 測定</button>
+<button onclick="runAnalyze('EXT_NG')" style="margin-left:6px;">伸展不能時 測定</button>
 </div>
 
 <div id="result">動画を選択してください</div>
 <div id="hud"></div>
+<div id="buildTag"></div>
 
 <div id="buttons">
 <button onclick="copyDebugLog()">ログコピー</button>
@@ -104,9 +104,12 @@ td,th{border:1px solid #555;padding:3px;text-align:center;}
 <!-- ===== MediaPipe ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 
-<!-- ===== Debug / UI helpers ===== -->
+<!-- ===== Debug ===== -->
 <script>
+const INDEX_ID = "index_12ROMn_SAFE_2026-01-02";
+const BUILD_TIME = new Date().toISOString();
 let DEBUG_LOG=[];
+
 function log(m){
   const t=new Date().toLocaleTimeString();
   DEBUG_LOG.push(`[${t}] ${m}`);
@@ -120,9 +123,37 @@ function toggleJOA(){
   const p=document.getElementById("joaPanel");
   p.style.display=(p.style.display==="none")?"block":"none";
 }
+
+document.getElementById("buildTag").innerText =
+  `INDEX-ID: ${INDEX_ID} / BUILD: ${BUILD_TIME}`;
 </script>
 
-<!-- ===== External Analyzer (唯一の解析ロジック) ===== -->
+<!-- ===== 必須：video / hands 初期化 ===== -->
+<script>
+window.video = document.createElement("video");
+video.muted = true;
+video.playsInline = true;
+
+window.hands = new Hands({
+  locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
+});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+
+hands.onResults(res=>{
+  if(res.multiHandLandmarks){
+    window.lastLandmarks = res.multiHandLandmarks[0];
+  }
+});
+
+log("index initialized: video & hands ready");
+</script>
+
+<!-- ===== External Analyzer ===== -->
 <script src="analyze.js"></script>
 
 <script>
@@ -132,13 +163,16 @@ function runAnalyze(mode){
     log("no video selected");
     return;
   }
+
   window.selectedGroup =
     document.querySelector('input[name="group"]:checked').value;
 
-  window.selectedVideoFile = file;
+  video.src = URL.createObjectURL(file);
 
-  log(`UI call → safeAnalyze(${mode})`);
-  safeAnalyze(mode);
+  video.onloadedmetadata = ()=>{
+    log(`UI call → safeAnalyze(${mode})`);
+    safeAnalyze(mode);
+  };
 }
 </script>
 
